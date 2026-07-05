@@ -11,22 +11,28 @@ restore() {
 }
 trap restore EXIT INT TERM
 
-# Oracle config: put your API key in /home/root/riddle/oracle.env, e.g.
+# Resolve our own install directory so the bundle works wherever it lives
+# (e.g. /home/root/xovi/exthome/appload/riddle/ when installed via AppLoad).
+HERE=$(cd "$(dirname "$0")" && pwd)
+
+# Oracle config: put your API key in oracle.env next to this script, e.g.
 #   RIDDLE_OPENAI_KEY=sk-...
 #   RIDDLE_OPENAI_BASE=https://api.openai.com/v1     # optional
 #   RIDDLE_OPENAI_MODEL=gpt-4o-mini                  # optional
 # Without it, riddle falls back to the pi backend (if pi is installed).
-if [ -f /home/root/riddle/oracle.env ]; then
-    set -a; . /home/root/riddle/oracle.env; set +a
+if [ -f "$HERE/oracle.env" ]; then
+    set -a; . "$HERE/oracle.env"; set +a
 fi
 
 systemctl stop xochitl
 rm -f /tmp/epframebuffer.lock      # stale EPD lock blocks the engine
 sleep 1
 
-cd /home/root/riddle
-# libquill.so is beside the quill install; qsgepaper from the scenegraph dir.
-LD_LIBRARY_PATH=/home/root/quill:/usr/lib/plugins/scenegraph \
+cd "$HERE"
+# libquill.so ships in this bundle; libqsgepaper.so (reMarkable's proprietary
+# engine) comes from the device's own scenegraph plugin dir. We search the
+# bundle first, then a standalone /home/root/quill install, then the plugin dir.
+LD_LIBRARY_PATH="$HERE:/home/root/quill:/usr/lib/plugins/scenegraph" \
     PAPERTERM_SHELL= HOME=/home/root \
-    /home/root/riddle/riddle
+    "$HERE/riddle"
 echo "riddle-takeover: diary closed ($?), restoring xochitl"
