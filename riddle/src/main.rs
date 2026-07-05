@@ -9,6 +9,7 @@
 
 mod display;
 mod fb;
+mod help;
 mod ink;
 mod oracle;
 mod pen;
@@ -41,6 +42,9 @@ enum State {
     Replying { plan: WritePlan, next: Instant, rx: Option<mpsc::Receiver<Result<String, String>>> },
     Lingering { until: Instant, region: BBox },
     FadingReply { stage: u32, next: Instant, region: BBox },
+    /// The guide panel. `panel: None` = dismissed, waiting for pen-up so the
+    /// dismissing touch doesn't leave a mark on the page.
+    Help { panel: Option<help::Help>, until: Instant },
 }
 
 struct WritePlan {
@@ -106,6 +110,12 @@ fn run() -> std::io::Result<()> {
     let mut user_ink = ink::Ink::new();
     let mut state = State::Listening { last_pen: None };
     let mut pen_down = false;
+    // Raw stylus contact, tracked in every state (the guide dismisses on it).
+    // `stylus_on` is the level; `stylus_tapped` latches any contact seen this
+    // loop iteration, so a tap that starts AND ends within one drain still
+    // registers.
+    let mut stylus_on = false;
+    let mut stylus_tapped = false;
     let mut ink_dirty = BBox::empty();
     let mut last_flush = Instant::now();
     // Takeover swaps are cheap and synchronous; qtfb needs coalescing.
@@ -128,6 +138,8 @@ fn run() -> std::io::Result<()> {
         if let Some(ref mut pdev) = pen_dev {
             for s in pdev.drain() {
                 let writing = s.touching && s.pressure > 40;
+                stylus_on = writing;
+                stylus_tapped |= writing;
                 if !writing {
                     if pen_down {
                         pen_down = false;
@@ -173,6 +185,8 @@ fn run() -> std::io::Result<()> {
             }
             match ev.input_type {
                 qtfb::INPUT_PEN_PRESS | qtfb::INPUT_PEN_UPDATE => {
+                    stylus_on = true;
+                    stylus_tapped = true;
                     if let State::Listening { ref mut last_pen } = state {
                         pen_down = true;
                         let r = 2 + ev.d.clamp(0, 100) / 45;
@@ -187,6 +201,7 @@ fn run() -> std::io::Result<()> {
                     }
                 }
                 qtfb::INPUT_PEN_RELEASE => {
+                    stylus_on = false;
                     if pen_down {
                         pen_down = false;
                         user_ink.pen_up();
@@ -211,19 +226,32 @@ fn run() -> std::io::Result<()> {
         state = match state {
             State::Listening { last_pen } => match last_pen {
                 Some(t) if !pen_down && t.elapsed() >= IDLE_COMMIT && !user_ink.is_empty() => {
-                    if let Err(e) = user_ink.to_png(&surf, PNG_PATH) {
-                        eprintln!("riddle: rasterize failed: {e}");
-                    }
-                    // Ask NOW: the model streams while the diary drinks the
-                    // ink, hiding most of the reply latency in the animation.
-                    let (tx, rx) = mpsc::channel();
-                    if let Some(ref o) = oracle {
-                        o.ask(PNG_PATH, tx);
+                    if help::looks_like_question_mark(user_ink.stroke_list()) {
+                        // Absorb the "?" and open the guide instead of asking.
+                        let (qx, qy, qw, qh) = user_ink.bbox.rect();
+                        surf.fill_rect(qx as usize, qy as usize, qw as usize, qh as usize, WHITE);
+                        disp.update(qx, qy, qw, qh, false);
+                        user_ink.clear();
+                        let panel = help::show(&mut surf, &font);
+                        let (px, py, pw, ph) = panel.region.rect();
+                        disp.update(px, py, pw, ph, false);
+                        eprintln!("riddle: guide shown");
+                        State::Help { panel: Some(panel), until: Instant::now() + Duration::from_secs(45) }
                     } else {
-                        let _ = tx.send(Err("no oracle".into()));
+                        if let Err(e) = user_ink.to_png(&surf, PNG_PATH) {
+                            eprintln!("riddle: rasterize failed: {e}");
+                        }
+                        // Ask NOW: the model streams while the diary drinks the
+                        // ink, hiding most of the reply latency in the animation.
+                        let (tx, rx) = mpsc::channel();
+                        if let Some(ref o) = oracle {
+                            o.ask(PNG_PATH, tx);
+                        } else {
+                            let _ = tx.send(Err("no oracle".into()));
+                        }
+                        let region = user_ink.bbox;
+                        State::Drinking { stage: 0, next: Instant::now(), region, rx }
                     }
-                    let region = user_ink.bbox;
-                    State::Drinking { stage: 0, next: Instant::now(), region, rx }
                 }
                 _ => State::Listening { last_pen },
             },
@@ -344,6 +372,23 @@ fn run() -> std::io::Result<()> {
                 }
             }
 
+            State::Help { panel, until } => match panel {
+                Some(p) => {
+                    if stylus_tapped || Instant::now() >= until {
+                        let region = p.dismiss(&mut surf);
+                        let (x, y, w, h) = region.rect();
+                        disp.update(x, y, w, h, false);
+                        eprintln!("riddle: guide dismissed");
+                        State::Help { panel: None, until }
+                    } else {
+                        State::Help { panel: Some(p), until }
+                    }
+                }
+                // Dismissed: swallow the closing touch, listen again on pen-up.
+                None if stylus_on => State::Help { panel: None, until },
+                None => State::Listening { last_pen: None },
+            },
+
             State::FadingReply { stage, next, region } => {
                 const STAGES: u32 = 10;
                 if Instant::now() >= next {
@@ -362,6 +407,7 @@ fn run() -> std::io::Result<()> {
             }
         };
 
+        stylus_tapped = false;
         std::thread::sleep(Duration::from_millis(2));
     }
 

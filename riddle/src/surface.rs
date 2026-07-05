@@ -136,6 +136,39 @@ impl Surface {
         }
     }
 
+    #[inline]
+    fn bpp(&self) -> usize {
+        match self.fmt {
+            PixFmt::Rgb565 => 2,
+            PixFmt::Rgb32 => 4,
+        }
+    }
+
+    /// Snapshot a rect's raw bytes (for save-under panels).
+    pub fn copy_rect(&self, x: usize, y: usize, w: usize, h: usize) -> Vec<u8> {
+        let (x1, y1) = ((x + w).min(self.w), (y + h).min(self.h));
+        let bpp = self.bpp();
+        let b = self.buf_ref();
+        let mut out = Vec::with_capacity((x1 - x) * (y1 - y) * bpp);
+        for row in y..y1 {
+            let s = row * self.stride + x * bpp;
+            out.extend_from_slice(&b[s..s + (x1 - x) * bpp]);
+        }
+        out
+    }
+
+    /// Put back bytes captured by `copy_rect` with the same geometry.
+    pub fn paste_rect(&mut self, x: usize, y: usize, w: usize, h: usize, data: &[u8]) {
+        let (x1, y1) = ((x + w).min(self.w), (y + h).min(self.h));
+        let (bpp, stride) = (self.bpp(), self.stride);
+        let row_len = (x1 - x) * bpp;
+        let b = self.buf();
+        for (i, row) in (y..y1).enumerate() {
+            let s = row * stride + x * bpp;
+            b[s..s + row_len].copy_from_slice(&data[i * row_len..(i + 1) * row_len]);
+        }
+    }
+
     pub fn stamp(&mut self, cx: i32, cy: i32, r: i32, c: u16) {
         for dy in -r..=r {
             for dx in -r..=r {

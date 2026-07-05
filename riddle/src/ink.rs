@@ -21,6 +21,11 @@ impl Ink {
         self.strokes.is_empty() && self.current.is_empty()
     }
 
+    /// Finished strokes (the current in-flight stroke is not included).
+    pub fn stroke_list(&self) -> &[Vec<(i32, i32, i32)>] {
+        &self.strokes
+    }
+
     pub fn clear(&mut self) {
         self.strokes.clear();
         self.current.clear();
