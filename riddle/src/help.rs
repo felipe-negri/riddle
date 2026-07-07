@@ -95,13 +95,24 @@ pub fn looks_like_question_mark(strokes: &[Vec<(i32, i32, i32)>]) -> bool {
 }
 
 const TITLE: &str = "The Diary";
-const BODY: &[&str] = &[
+/// Takeover mode: riddle owns touch and the power button.
+const BODY_TAKEOVER: &[&str] = &[
     "Write, then rest your quill:",
     "the diary drinks your ink and Tom replies.",
     "",
     "Flip the marker to erase.",
     "Tap five fingers at once to leave.",
     "The power button sleeps the diary.",
+    "",
+    "A large ? summons this guide.",
+];
+/// Windowed mode: AppLoad owns the window and xochitl owns the button.
+const BODY_WINDOWED: &[&str] = &[
+    "Write, then rest your quill:",
+    "the diary drinks your ink and Tom replies.",
+    "",
+    "Flip the marker to erase.",
+    "Close the diary from AppLoad.",
     "",
     "A large ? summons this guide.",
 ];
@@ -123,17 +134,20 @@ pub struct Help {
 }
 
 /// Draw the guide panel centered on the page; returns it for later dismissal.
-pub fn show(surf: &mut Surface, font: &FontRef) -> Help {
+/// The gesture list depends on the display mode: only takeover owns the
+/// touchscreen (5-finger exit) and the power button.
+pub fn show(surf: &mut Surface, font: &FontRef, takeover: bool) -> Help {
+    let body = if takeover { BODY_TAKEOVER } else { BODY_WINDOWED };
     let title_h = (TITLE_PX * 1.4) as usize;
     let line_h = (BODY_PX * 1.3) as usize;
     let footer_h = (FOOTER_PX * 1.4) as usize;
 
     let mut wmax = script::measure(font, TITLE, TITLE_PX);
-    for l in BODY {
+    for l in body {
         wmax = wmax.max(script::measure(font, l, BODY_PX));
     }
     let pw = (wmax as usize + 2 * PAD).min(SCREEN_W - 40);
-    let ph = PAD + title_h + line_h / 2 + BODY.len() * line_h + footer_h + PAD;
+    let ph = PAD + title_h + line_h / 2 + body.len() * line_h + footer_h + PAD;
     let px = (SCREEN_W - pw) / 2;
     let py = (SCREEN_H.saturating_sub(ph)) / 2;
 
@@ -145,7 +159,7 @@ pub fn show(surf: &mut Surface, font: &FontRef) -> Help {
     let mut y = py + PAD;
     blit_centered(surf, font, TITLE, TITLE_PX, px, pw, y);
     y += title_h + line_h / 2;
-    for l in BODY {
+    for l in body {
         if !l.is_empty() {
             blit_centered(surf, font, l, BODY_PX, px, pw, y);
         }
@@ -278,7 +292,7 @@ mod tests {
         surf.fill_rect(700, 1000, 200, 200, BLACK);
         let before = surf.copy_rect(0, 0, w, h);
 
-        let panel = show(&mut surf, &font);
+        let panel = show(&mut surf, &font, true);
         let (px, py, pw, ph) = panel.region.rect();
         assert!(pw > 400 && ph > 400, "panel too small: {pw}x{ph}");
         // Panel must contain ink (text + frame).

@@ -75,18 +75,27 @@ impl PiOracle {
         let _ = std::fs::create_dir_all(DATA_DIR);
         let path = std::env::var("PATH").unwrap_or_default();
 
+        // Overridable so pi setups other than the stock on-device install
+        // (different bin dir, provider, or model) can still power the diary.
+        let node_bin =
+            std::env::var("RIDDLE_PI_BIN_DIR").unwrap_or_else(|_| NODE_BIN.to_string());
+        let provider =
+            std::env::var("RIDDLE_PI_PROVIDER").unwrap_or_else(|_| "openai-codex".to_string());
+        let model =
+            std::env::var("RIDDLE_PI_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".to_string());
+
         // Use pi's ABSOLUTE path: Rust's Command resolves the program name via
         // the PARENT's PATH, not the child env we set below, so a bare "pi"
         // would not be found when riddle is launched with a minimal PATH.
-        let pi_bin = format!("{NODE_BIN}/pi");
+        let pi_bin = format!("{node_bin}/pi");
         let mut child = Command::new(&pi_bin)
             .current_dir(DATA_DIR)
             .env("HOME", "/home/root")
-            .env("PATH", format!("{NODE_BIN}:{path}"))
+            .env("PATH", format!("{node_bin}:{path}"))
             .args([
                 "--mode", "rpc",
-                "--provider", "openai-codex",
-                "--model", "gpt-5.4-mini",
+                "--provider", provider.as_str(),
+                "--model", model.as_str(),
                 "--thinking", "off",
                 // The diary only ever writes back — never let the model touch
                 // tools; also trims the tool schemas from every request.
@@ -279,30 +288,60 @@ impl HttpOracle {
             .unwrap_or_default();
 
         thread::spawn(move || {
+            // Guard rails on the socket: without them a dropped connection or
+            // a stalled SSE stream leaves the diary "thinking" forever. The
+            // read timeout is per-read, so a healthy stream can run long —
+            // only silence trips it (thinking models can lead with ~a minute).
+            let agent = ureq::AgentBuilder::new()
+                .timeout_connect(std::time::Duration::from_secs(10))
+                .timeout_read(std::time::Duration::from_secs(90))
+                .build();
+
             // OpenAI chat-completions with a data-URI image part, streaming.
-            let body = format!(
-                concat!(
-                    "{{\"model\":{},\"stream\":true,\"max_tokens\":{},{}",
-                    "\"messages\":[",
-                    "{{\"role\":\"system\",\"content\":{}}},",
-                    "{{\"role\":\"user\",\"content\":[",
-                    "{{\"type\":\"text\",\"text\":{}}},",
-                    "{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"data:image/png;base64,{}\"}}}}",
-                    "]}}]}}"
-                ),
-                json_quote(&model),
-                max_tokens,
-                reasoning_field,
-                json_quote(PERSONA),
-                json_quote("Reply to what is written in the diary."),
-                img,
-            );
+            // The token-cap field is provider-dependent: OpenAI's newest
+            // models reject "max_tokens" and demand "max_completion_tokens",
+            // while many OpenAI-compatible servers only know "max_tokens".
+            // Send the widely-supported name first; retry once if corrected.
+            let request = |cap_field: &str| {
+                let body = format!(
+                    concat!(
+                        "{{\"model\":{},\"stream\":true,\"{}\":{},{}",
+                        "\"messages\":[",
+                        "{{\"role\":\"system\",\"content\":{}}},",
+                        "{{\"role\":\"user\",\"content\":[",
+                        "{{\"type\":\"text\",\"text\":{}}},",
+                        "{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"data:image/png;base64,{}\"}}}}",
+                        "]}}]}}"
+                    ),
+                    json_quote(&model),
+                    cap_field,
+                    max_tokens,
+                    reasoning_field,
+                    json_quote(PERSONA),
+                    json_quote("Reply to what is written in the diary."),
+                    img,
+                );
+                agent
+                    .post(&format!("{base}/chat/completions"))
+                    .set("Authorization", &format!("Bearer {key}"))
+                    .set("Content-Type", "application/json")
+                    .send_string(&body)
+            };
 
             let asked = std::time::Instant::now();
-            let resp = ureq::post(&format!("{base}/chat/completions"))
-                .set("Authorization", &format!("Bearer {key}"))
-                .set("Content-Type", "application/json")
-                .send_string(&body);
+            let resp = match request("max_tokens") {
+                Err(ureq::Error::Status(400, r)) => {
+                    let detail = r.into_string().unwrap_or_default();
+                    if detail.contains("max_completion_tokens") {
+                        eprintln!("riddle: endpoint wants max_completion_tokens; retrying");
+                        request("max_completion_tokens")
+                    } else {
+                        let _ = tx.send(Err(format!("http 400: {}", detail.trim())));
+                        return;
+                    }
+                }
+                other => other,
+            };
 
             let reader = match resp {
                 Ok(r) => r.into_reader(),
