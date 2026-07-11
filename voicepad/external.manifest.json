@@ -1,8 +1,0 @@
-{
-  "id": "voicepad",
-  "name": "Voicepad",
-  "version": "0.4.2",
-  "description": "Shared editable voice-and-keyboard document with cursor and manuscript ink.",
-  "application": "appload-launch.sh",
-  "qtfb": false
-}

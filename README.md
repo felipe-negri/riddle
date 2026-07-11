@@ -64,10 +64,10 @@ pen. (Or install it from the **Store** app right on the tablet.)
                      is; what the prebuilt bundle runs)
 ```
 
-- **`riddle/`** — the app (Rust). Pen input, ink surface, handwriting
+- **This repository** — the app (Rust). Pen input, ink surface, handwriting
   synthesis (rasterize → Zhang-Suen thinning → stroke tracing → animated
   replay), the oracle process manager, and both display backends.
-- **`quill/`** — the takeover display host (C/C++). An
+- **[Quill](https://github.com/MaximeRivest/quill)** — the sibling takeover display host (C/C++). An
   [epfb-re](https://github.com/asivery/epfb-re)-style QImage-constructor
   interposition shim over the vendor `libqsgepaper.so` waveform engine,
   exposed as a small C ABI (`quill_init` / `quill_buffer` / `quill_swap`)
@@ -165,7 +165,7 @@ pi at `/home/root/node/bin` (`RIDDLE_PI_BIN_DIR`), provider `openai-codex`
 (`RIDDLE_PI_PROVIDER`), model `gpt-5.4-mini` (`RIDDLE_PI_MODEL`).
 
 Both stream the reply sentence-by-sentence, so the quill starts writing seconds
-before the model finishes. The persona prompt lives in `riddle/src/oracle.rs`.
+before the model finishes. The persona prompt lives in `src/oracle.rs`.
 
 A note on Tom's memory: with the HTTP backend every page is a fresh
 conversation — Tom does not remember your previous page. With pi, the warm
@@ -187,6 +187,7 @@ built. Requires [xovi + AppLoad](https://github.com/asivery/rm-appload) on
 the device.
 
 ```sh
+git clone https://github.com/MaximeRivest/riddle
 cd riddle
 cargo build --release --target aarch64-unknown-linux-gnu
 ```
@@ -203,6 +204,7 @@ vendor Qt libs need its glibc, **and** `libqsgepaper.so` pulled from *your own
 device* (it is proprietary and not distributed here):
 
 ```sh
+# Keep the quill and riddle repositories beside each other.
 cd quill && ./build.sh              # pulls libqsgepaper.so from the device over
                                     # ssh, builds libquill.so + the demos
 cd ../riddle && ./build-takeover.sh
@@ -230,12 +232,12 @@ riddle dies uncleanly. If anything wedges:
 - riddle never writes replies to disk. The pi backend, however, keeps its own
   session history in its data dir — the HTTP backend keeps nothing.
 - Tom stays in character by design: the persona prompt (see
-  `riddle/src/oracle.rs`) tells the model it is the diary and nothing else.
+  `src/oracle.rs`) tells the model it is the diary and nothing else.
 
 ## Fonts
 
 The reply hand is [Dancing Script](https://github.com/googlefonts/DancingScript)
-(SIL OFL 1.1 — see `riddle/fonts/OFL.txt`).
+(SIL OFL 1.1 — see `fonts/OFL.txt`).
 
 ## License
 

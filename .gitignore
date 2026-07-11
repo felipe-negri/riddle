@@ -1,15 +1,6 @@
-riddle/target/
-quill/build/
-quill/vendor/*.so
+/target/
+/dist/
 *.log
 
-# never commit a real API key
-riddle/oracle.env
-oracle.env
-riddle/dist/
-drawlab/dist/
-home/dist/
-inktype/target/
-inktype/dist/
-voicepad/android/build/
-voicepad/dist/
+# Never commit a real API key.
+/oracle.env
