@@ -42,7 +42,14 @@ fn expand565(c: u16) -> (u8, u8, u8) {
 
 impl Surface {
     pub fn new(ptr: *mut u8, len: usize, w: usize, h: usize, stride: usize, fmt: PixFmt) -> Self {
-        Self { ptr, len, w, h, stride, fmt }
+        Self {
+            ptr,
+            len,
+            w,
+            h,
+            stride,
+            fmt,
+        }
     }
 
     #[inline]

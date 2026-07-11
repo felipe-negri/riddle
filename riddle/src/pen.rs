@@ -43,6 +43,8 @@ pub struct PenSample {
     pub pressure: i32,
     pub tool: Tool,
     pub touching: bool,
+    /// True from tool-in-range until the pen leaves the digitizer.
+    pub proximity: bool,
 }
 
 pub struct PenDevice {
@@ -53,6 +55,9 @@ pub struct PenDevice {
     pressure: i32,
     tool: Tool,
     touching: bool,
+    pen_in_range: bool,
+    rubber_in_range: bool,
+    proximity: bool,
     dirty: bool,
 }
 
@@ -67,7 +72,10 @@ impl PenDevice {
         }
         let grab = unsafe { libc::ioctl(fd, EVIOCGRAB, 1i32) };
         if grab != 0 {
-            eprintln!("riddle: warning: EVIOCGRAB failed ({}) — xochitl will also see the pen", io::Error::last_os_error());
+            eprintln!(
+                "riddle: warning: EVIOCGRAB failed ({}) — xochitl will also see the pen",
+                io::Error::last_os_error()
+            );
         }
         eprintln!("riddle: pen device {path} opened (grabbed: {})", grab == 0);
         Ok(Self {
@@ -77,6 +85,9 @@ impl PenDevice {
             pressure: 0,
             tool: Tool::Pen,
             touching: false,
+            pen_in_range: false,
+            rubber_in_range: false,
+            proximity: false,
             dirty: false,
         })
     }
@@ -92,7 +103,8 @@ impl PenDevice {
         // input_event on 64-bit: struct timeval (16) + type u16 + code u16 + value i32.
         let mut buf = [0u8; 24 * 64];
         loop {
-            let n = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            let n =
+                unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n <= 0 {
                 break;
             }
@@ -113,11 +125,21 @@ impl PenDevice {
                         self.pressure = value;
                         self.dirty = true;
                     }
-                    (EV_KEY, BTN_TOOL_PEN) if value == 1 => {
-                        self.tool = Tool::Pen;
+                    (EV_KEY, BTN_TOOL_PEN) => {
+                        self.pen_in_range = value == 1;
+                        if self.pen_in_range {
+                            self.tool = Tool::Pen;
+                        }
+                        self.proximity = self.pen_in_range || self.rubber_in_range;
+                        self.dirty = true;
                     }
                     (EV_KEY, BTN_TOOL_RUBBER) => {
-                        self.tool = if value == 1 { Tool::Eraser } else { Tool::Pen };
+                        self.rubber_in_range = value == 1;
+                        if self.rubber_in_range {
+                            self.tool = Tool::Eraser;
+                        }
+                        self.proximity = self.pen_in_range || self.rubber_in_range;
+                        self.dirty = true;
                     }
                     (EV_KEY, BTN_TOUCH) => {
                         self.touching = value == 1;
@@ -132,6 +154,7 @@ impl PenDevice {
                                 pressure: self.pressure,
                                 tool: self.tool,
                                 touching: self.touching,
+                                proximity: self.proximity,
                             });
                         }
                     }
@@ -161,5 +184,8 @@ fn find_marker_device() -> io::Result<String> {
             }
         }
     }
-    Err(io::Error::new(io::ErrorKind::NotFound, "no marker input device found"))
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "no marker input device found",
+    ))
 }

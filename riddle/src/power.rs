@@ -33,7 +33,10 @@ impl PowerButton {
             eprintln!("riddle: power button /dev/input/event{i} (grabbed: {grabbed})");
             return Ok(Self { fd, grabbed });
         }
-        Err(io::Error::new(io::ErrorKind::NotFound, "no power button device"))
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no power button device",
+        ))
     }
 
     /// True if a power-key press (value 1) was seen since the last drain.
@@ -41,7 +44,8 @@ impl PowerButton {
         let mut pressed = false;
         let mut buf = [0u8; 24 * 16];
         loop {
-            let n = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            let n =
+                unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n <= 0 {
                 break;
             }

@@ -47,6 +47,10 @@ pub enum Decision {
         end: usize,
         text: String,
     },
+    /// Atomic exact-text replacements produced from free-form paper markup.
+    PaperEdits {
+        edits: Vec<(String, String)>,
+    },
 }
 
 #[derive(Clone)]
@@ -104,12 +108,14 @@ impl Oracle {
     }
 
     fn ask_sync(&self, req: &Request) -> Result<Decision, String> {
-        let system = if req.command {
-            "You are classifying a handwriting COMMAND, never transcribing ordinary document text. The first unresolved gesture is a loose circle around existing canonical TYPESET text. Every later gesture belongs only to the handwritten action beside that circle. HINTS supplies the authoritative selected range and exact SELECTED text. Never insert the action word itself, never delete SELECTED merely because the action is unclear, and never treat the circle as an eraser. Recognize one action: sort, calculate, correct, reflow, or a rat runtime selector. If the selected text is an [[INKTYPE_MATH:...]] block and the action is calculate, return exactly MATHCALC:N,S,E using decimal integers. For correct, preserve the language, indentation, and complete opening/closing backtick fences. For reflow, join selected lines as one paragraph. A rat runtime selector executes the selection. Handwritten 'run' is the selector 'py'. Handwritten 'py', 'r', 'pi', or a named selector such as 'my-py-here' executes the exact selection through rat. For runtime execution return exactly RAT:N,S,E:SELECTOR with all pending gestures consumed and exact selected offsets, substituting decimal integers for N, S, and E (never output the letter N); do not interpret, rewrite, or execute the source yourself. A handwritten 'df NAME', 'py df NAME', or 'r df NAME' converts the selected table to a persistent data frame (default runtime py and default name df). For this return exactly DATA:N,S,E:RUNTIME:NAME:JSON using decimal integers (never the letter N), where JSON is one compact object {\"columns\":[strings],\"rows\":[arrays]}; infer numbers, booleans and null, preserve strings literally, and never add rows or columns. For transformations return exactly EDIT:N:S:E:T on one line, where N consumes every pending gesture, S and E are the exact selected offsets from HINTS, and T is only the corrected/transformed SELECTED text. Example: selected range 6..17 is 'my hands is', action correct, 9 gestures pending -> EDIT:9:6:17:my name is. Never output the action word, the whole document, a before/after explanation, or multiple lines outside T. No prose, markdown, or quotes. Encode structural line breaks in T as the literal token <NL> (never use \\n, because Python code may contain that escape). If the circle has no legible action beside it yet, return ?."
+        let system = if req.paper_edit {
+            "You are a precise paper-edit interpreter. The image is a complete annotated paper document. TEXT is the authoritative canonical text; dark pen marks are editing instructions, never document content. Interpret circles, arrows, strike-throughs, carets, insertion text, move/reorder marks, tab symbols, and notes such as remove tab, indent, dedent, move to new function, or name it x_func. Return exactly PATCH:[{\"old_text\":\"exact source\",\"new_text\":\"replacement\"}] on one line. The value immediately after PATCH: must be a compact JSON array; never output the literal word JSON. Each old_text must be an exact, nonempty, uniquely occurring substring of TEXT. Use one replacement per independent region; include enough unchanged context to make old_text unique. Preserve significant Python whitespace and produce runnable Python when editing Python. For a move, remove the source and insert it at the destination using non-overlapping replacements. Never alter unmarked text. Never return offsets, prose, Markdown, or handwritten annotation text. Return ? if the markup is ambiguous."
+        } else if req.command {
+            "You are classifying a handwriting COMMAND, never transcribing ordinary document text. The first unresolved gesture is a loose circle or a straight right-margin selection line around/beside existing canonical TYPESET text. Every other unresolved gesture belongs only to the handwritten action. HINTS supplies the authoritative selected range and exact SELECTED text. Never insert the action word itself, never delete SELECTED merely because the action is unclear, and never treat selection marks as text or erasers. Recognize one action: sort, calculate, correct (including the handwritten alias fix), reflow, or a rat runtime selector. If the selected text is an [[INKTYPE_MATH:...]] block and the action is calculate, return exactly MATHCALC:N,S,E using decimal integers. For correct/fix, EDIT means replace exactly the authoritative selected range with one corrected copy; never append the correction, duplicate a line, or return an insertion range. Preserve the language, exact significant indentation, and complete opening/closing backtick fences. When the selection is Python, return syntactically runnable Python: preserve block indentation, dedent only when required by its surrounding source, and never replace spaces with prose formatting. For reflow, join selected lines as one paragraph. A rat runtime selector executes the selection. Handwritten 'run' is the selector 'py'. Handwritten 'py', 'r', 'pi', or a named selector such as 'my-py-here' executes the exact selection through rat. For runtime execution return exactly RAT:N,S,E:SELECTOR with all pending gestures consumed and exact selected offsets, substituting decimal integers for N, S, and E (never output the letter N); do not interpret, rewrite, or execute the source yourself. A handwritten 'df NAME', 'py df NAME', or 'r df NAME' converts the selected table to a persistent data frame (default runtime py and default name df). For this return exactly DATA:N,S,E:RUNTIME:NAME:JSON using decimal integers (never the letter N), where JSON is one compact object {\"columns\":[strings],\"rows\":[arrays]}; infer numbers, booleans and null, preserve strings literally, and never add rows or columns. For transformations return exactly EDIT:N:S:E:T on one line, where N consumes every pending gesture, S and E are the exact selected offsets from HINTS, and T is only the corrected/transformed SELECTED text. Example: selected range 6..17 is 'my hands is', action correct, 9 gestures pending -> EDIT:9:6:17:my name is. Never output the action word, the whole document, a before/after explanation, or multiple lines outside T. No prose, markdown, or quotes. Encode structural line breaks in T as the literal token <NL> (never use \\n, because Python code may contain that escape). If the circle has no legible action beside it yet, return ?."
         } else if req.math_mode {
             "You are a handwritten-mathematics transcriber. The darker unresolved handwriting is exactly one mathematical expression. Return exactly MATH:N,S,E:JSON, where N consumes every pending gesture, S and E are the supplied ANCHOR, and JSON is one compact object with string fields latex (display LaTeX without dollar delimiters) and semantic (executable SymPy syntax). Examples: {\"latex\":\"\\\\frac{1}{2}\",\"semantic\":\"Rational(1,2)\"}; {\"latex\":\"\\\\int_0^1 x^2\\\\,dx\",\"semantic\":\"Integral(x**2,(x,0,1))\"}. Do not return the ordinary edit protocol, prose, markdown, or incomplete trailing operators. Return ? if the expression is visibly unfinished."
         } else {
-            "You are a literal, low-latency handwriting text reconciler, not an autocomplete system. The image shows ruled paper, canonical TYPESET text, and darker unresolved HANDWRITING. TEXT is the exact canonical document. This is TEXT MODE: transcribe every gesture as ordinary text, even if it resembles a letter used in mathematics. Never return MATH or JSON. COMMAND FAIL-SAFE: if the first unresolved gesture is a large loop around existing typeset text and later strokes look like an action such as correct, sort, calculate, reflow, run, py, or r, return ? and never delete or replace the enclosed text. Ignore the top-right 'AI' status, mode button, and any thin vertical caret bar. Incorporate only letters actually handwritten; never invent likely words. Preserve visible word boundaries: a clear horizontal gap between words must become one space, and a GAP_AFTER_TEXT hint means T should normally begin with a space. Recently typeset tail characters are provisional: when new adjacent ink makes an earlier recognition demonstrably wrong, include those recent character offsets in [S,E) and correct them instead of merely appending. Consume only the oldest confidently resolved prefix of PENDING; leave an ambiguous trailing glyph pending. Reply with EXACTLY one line, no prose and no markdown. '?' means no confident prefix can yet be resolved. Otherwise output N,S,E:T: consume N oldest pending gestures and replace character range [S,E) with raw text T. Never quote T. Empty T deletes. All indices are Unicode character offsets and must satisfy 0<=S<=E<=LEN. LINES maps each typeset line's screen baseline y to its character offsets; use it with the gesture coordinates to pick S and E precisely between the right characters. Writing on a lower ruled line than the last typeset line means the user started a new line: put <NL> in T where lines break (one per blank ruled line skipped). Handwriting that itself spans several ruled lines joins with <NL>. If a CARET hint is given, the user erased text there and is writing its replacement: insert at that offset. Prefer consuming all PENDING together; if their trailing glyph is incomplete return ?. Examples: TEXT='' with three gestures spelling Hi -> 3,0,0:Hi ; TEXT='hel' with handwriting lo -> 2,3,3:lo ; TEXT='cat' (LEN=3) with handwriting dog on the next ruled line -> 3,3,3:<NL>dog ; TEXT='a big cat' CARET=2 with handwriting red -> 3,2,2:red."
+            "You are a literal, low-latency handwriting and code reconciler, not an autocomplete system. The image shows ruled paper, canonical TYPESET text, and darker unresolved HANDWRITING. Transcribe programming text character-for-character: preserve leading spaces on every line, punctuation, underscores, quotes, parentheses, colons, and visible line breaks. For Python, indentation is syntax; never flatten, reflow, auto-correct, or invent code, and ensure the transcription retains the indentation shown on the ruled lines. TEXT is the exact canonical document. This is TEXT MODE: transcribe every gesture as ordinary text, even if it resembles a letter used in mathematics. Never return MATH or JSON. COMMAND FAIL-SAFE: if the first unresolved gesture is a large loop around existing typeset text and later strokes look like an action such as correct, sort, calculate, reflow, run, py, or r, return ? and never delete or replace the enclosed text. Ignore the top-right 'AI' status, mode button, and any thin vertical caret bar. Incorporate only letters actually handwritten; never invent likely words. Preserve visible word boundaries: a clear horizontal gap between words must become one space, and a GAP_AFTER_TEXT hint means T should normally begin with a space. Recently typeset tail characters are provisional: when new adjacent ink makes an earlier recognition demonstrably wrong, include those recent character offsets in [S,E) and correct them instead of merely appending. Consume only the oldest confidently resolved prefix of PENDING; leave an ambiguous trailing glyph pending. Reply with EXACTLY one line, no prose and no markdown. '?' means no confident prefix can yet be resolved. Otherwise output N,S,E:T: consume N oldest pending gestures and replace character range [S,E) with raw text T. Never quote T. Empty T deletes. All indices are Unicode character offsets and must satisfy 0<=S<=E<=LEN. LINES maps each typeset line's screen baseline y to its character offsets; use it with the gesture coordinates to pick S and E precisely between the right characters. Writing on a lower ruled line than the last typeset line means the user started a new line: put <NL> in T where lines break (one per blank ruled line skipped). Handwriting that itself spans several ruled lines joins with <NL>. If a CARET hint is given, the user erased text there and is writing its replacement: insert at that offset. Prefer consuming all PENDING together; if their trailing glyph is incomplete return ?. Examples: TEXT='' with three gestures spelling Hi -> 3,0,0:Hi ; TEXT='hel' with handwriting lo -> 2,3,3:lo ; TEXT='cat' (LEN=3) with handwriting dog on the next ruled line -> 3,3,3:<NL>dog ; TEXT='a big cat' CARET=2 with handwriting red -> 3,2,2:red."
         };
         let force = if req.force {
             "This is a forced retry after a pause: decide unless genuinely illegible."
@@ -126,6 +132,20 @@ impl Oracle {
             req.text, req.text.chars().count(), req.anchor, req.line_map, req.pending_count, req.tool, req.gesture_summary,
             req.crop_x, req.crop_y, req.crop_w, req.crop_h, hint, force
         );
+        let dots_text = self.model.contains("dots.ocr")
+            && !req.command
+            && !req.math_mode
+            && !req.paper_edit;
+        let system = if dots_text {
+            "Return only the literal handwritten text visible in the image. Preserve every character, leading indentation, spaces, and line break. For Python code, indentation and punctuation must remain exactly runnable as written. Do not explain, reflow, auto-correct, or add Markdown fences."
+        } else {
+            system
+        };
+        let prompt = if dots_text {
+            "Extract the text content from this image.".to_string()
+        } else {
+            prompt
+        };
         let slot = req.id % 20;
         debug_write(slot, "png", &req.png);
         debug_write(
@@ -148,7 +168,7 @@ impl Oracle {
             "stream": false,
             "temperature": 0,
             "reasoning_effort": "none",
-            "max_tokens": if req.command { 512 } else { 128 },
+            "max_tokens": if req.paper_edit { 2048 } else if req.command { 512 } else { 128 },
             "messages": [
                 {"role":"system", "content":system},
                 {"role":"user", "content":[
@@ -212,6 +232,18 @@ impl Oracle {
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
             .ok_or_else(|| format!("no content: {value}"))?;
+        if dots_text {
+            let transcription = raw.trim();
+            if transcription.is_empty() || transcription == "?" {
+                return Ok(Decision::Wait);
+            }
+            return Ok(Decision::Edit {
+                consume: req.pending_count,
+                start: req.anchor,
+                end: req.anchor,
+                text: transcription.to_string(),
+            });
+        }
         parse_decision(raw, req.pending_count, req.text.chars().count(), req.anchor)
             .map_err(|e| format!("{e}; raw={raw:?}"))
     }
@@ -230,6 +262,7 @@ pub struct Request {
     pub hint: String,
     pub command: bool,
     pub math_mode: bool,
+    pub paper_edit: bool,
     pub crop_x: i32,
     pub crop_y: i32,
     pub crop_w: usize,
@@ -252,6 +285,7 @@ pub struct PlacementReply {
     pub source_start: usize,
     pub source_end: usize,
     pub source: String,
+    pub raw_result: String,
     pub result: Result<Placement, String>,
 }
 
@@ -288,6 +322,7 @@ impl Oracle {
                 source_start,
                 source_end,
                 source,
+                raw_result: result,
                 result: placed,
             });
         });
@@ -303,7 +338,7 @@ impl Oracle {
         result: &str,
         error: bool,
     ) -> Result<Placement, String> {
-        let system = "You place a program result into a paper-like document. Return exactly PLACE:S:STYLE:T, where S is one Unicode character insertion offset, STYLE is INLINE or LINE, and T is only the lightly presented result. Choose INLINE only for a short scalar that naturally completes an expression; InkType will insert ` = ` before it. Choose LINE for tables, multiline values, errors, images, math blocks, code output, or whenever inline placement would be cramped; InkType will put it on its own line. Never place bare text directly against an existing character. Do not include runtime names, arrows, timing, variable counts, commentary, or labels such as Result. Preserve the complete useful value and its structure; do not explain, substantially summarize, truncate, omit rows, or collapse lines merely to save space. Results may naturally wrap and occupy multiple full pages. Preserve an [[INKTYPE_IMAGE:...]] or [[INKTYPE_MATH:...]] line exactly. Encode line breaks as <NL>. Usually insert immediately after the source expression, assignment, code block, or question, but you may choose another location when the page clearly implies it. This is insertion-only: never replace source text. For errors, use LINE and show only the concise useful error.";
+        let system = "You place a program result into a paper-like document. Return exactly PLACE:S:LINE:T, where S is one Unicode character insertion offset and T is only the lightly presented result. Results are always separate lines so inserting one can never alter or invalidate Python source. Never return INLINE. Choose an offset after the complete source statement or block, not inside its indentation-sensitive code. Never place bare text directly against an existing character. Do not include runtime names, arrows, timing, variable counts, commentary, or labels such as Result. Preserve the complete useful value and its structure; do not explain, substantially summarize, truncate, omit rows, or collapse lines merely to save space. Results may naturally wrap and occupy multiple full pages. Preserve an [[INKTYPE_IMAGE:...]] or [[INKTYPE_MATH:...]] line exactly. Encode line breaks as <NL>. Usually insert immediately after the source expression, assignment, code block, or question, but you may choose another location when the page clearly implies it. This is insertion-only: never replace source text. For errors, use LINE and show only the concise useful error.";
         let prompt = format!(
             "DOCUMENT={document:?}\nLEN={}\nSOURCE_RANGE={source_start}..{source_end}\nSOURCE={source:?}\nRUNTIME={selector:?}\nERROR={error}\nRAW_RESULT={result:?}",
             document.chars().count()
@@ -359,15 +394,13 @@ impl Oracle {
         if at > chars.len() {
             return Err(format!("unsafe placement offset {at}"));
         }
-        let text = match style {
-            "INLINE" => format!(" = {}", presented.trim()),
-            "LINE" => {
-                let prefix = if at > 0 && chars[at - 1] != '\n' { "\n" } else { "" };
-                let suffix = if at < chars.len() && chars[at] != '\n' { "\n" } else { "" };
-                format!("{prefix}{}{suffix}", presented.trim())
-            }
-            _ => return Err(format!("bad placement style: {style:?}")),
-        };
+        if !matches!(style, "LINE" | "INLINE") {
+            return Err(format!("bad placement style: {style:?}"));
+        }
+        // Enforce this locally even if the model disobeys and asks for INLINE.
+        let prefix = if at > 0 && chars[at - 1] != '\n' { "\n" } else { "" };
+        let suffix = if at < chars.len() && chars[at] != '\n' { "\n" } else { "" };
+        let text = format!("{prefix}{}{suffix}", presented.trim());
         Ok(Placement { at, text })
     }
 }
@@ -411,6 +444,39 @@ pub fn parse_decision(
     };
     if line == "?" {
         return Ok(Decision::Wait);
+    }
+    if let Some(payload) = line.strip_prefix("PATCH:") {
+        // Some models echo the protocol metavariable before the actual array.
+        // Accept `PATCH:JSON\n[...]` as well as the requested `PATCH:[...]`.
+        let payload = payload.trim();
+        let payload = payload
+            .strip_prefix("JSON")
+            .map(str::trim)
+            .unwrap_or(payload);
+        let values: Value = serde_json::from_str(payload)
+            .map_err(|e| format!("paper edit JSON: {e}"))?;
+        let array = values
+            .as_array()
+            .ok_or_else(|| "paper edit JSON must be an array".to_string())?;
+        let mut edits = Vec::new();
+        for value in array {
+            let old_text = value
+                .get("old_text")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "paper edit needs old_text".to_string())?;
+            let new_text = value
+                .get("new_text")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "paper edit needs new_text".to_string())?;
+            if old_text.is_empty() {
+                return Err("paper edit old_text cannot be empty".into());
+            }
+            edits.push((old_text.to_string(), new_text.to_string()));
+        }
+        if edits.is_empty() {
+            return Err("paper edit list cannot be empty".into());
+        }
+        return Ok(Decision::PaperEdits { edits });
     }
     if let Some(rest) = line.strip_prefix("EDIT:") {
         let mut parts = rest.splitn(4, ':');

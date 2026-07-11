@@ -1,6 +1,6 @@
 riddle/target/
 quill/build/
-quill/vendor/
+quill/vendor/*.so
 *.log
 
 # never commit a real API key
@@ -9,3 +9,7 @@ oracle.env
 riddle/dist/
 drawlab/dist/
 home/dist/
+inktype/target/
+inktype/dist/
+voicepad/android/build/
+voicepad/dist/

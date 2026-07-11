@@ -46,6 +46,7 @@ const ERROR_RETRY: Duration = Duration::from_millis(420);
 const MAX_FORCED_WAITS: u8 = 2;
 const MATH_DEBOUNCE: Duration = Duration::from_millis(350);
 static MATH_MODE: AtomicBool = AtomicBool::new(false);
+static PAPER_EDIT_MODE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tool {
@@ -353,7 +354,7 @@ fn run() -> std::io::Result<()> {
                 }
                 dirty_add(&mut dirty, x, y, r + 3);
                 gesture.points.push((x, y, r));
-            } else if let Some(g) = current.take() {
+            } else if let Some(mut g) = current.take() {
                 if g.points.is_empty() {
                 } else if in_reset_button(&g) {
                     // Debug escape hatch: tap the top-left button to wipe
@@ -362,6 +363,7 @@ fn run() -> std::io::Result<()> {
                     text.clear();
                     pending.clear();
                     MATH_MODE.store(false, Ordering::Relaxed);
+                    PAPER_EDIT_MODE.store(false, Ordering::Relaxed);
                     scroll_y = 0;
                     caret = None;
                     current = None;
@@ -382,12 +384,28 @@ fn run() -> std::io::Result<()> {
                 } else if in_mode_button(&g) {
                     let enabled = !MATH_MODE.load(Ordering::Relaxed);
                     MATH_MODE.store(enabled, Ordering::Relaxed);
+                    PAPER_EDIT_MODE.store(false, Ordering::Relaxed);
                     pending.clear();
                     dispatch_due = None;
                     layout = render_all(&mut surf, &font, &text, &pending, scroll_y);
                     paint_status(&mut surf, &font, if enabled { "math mode" } else { "text mode" });
                     disp.full_refresh(W, H);
                     dirty = None;
+                } else if in_paper_button(&g) {
+                    let enabled = !PAPER_EDIT_MODE.load(Ordering::Relaxed);
+                    PAPER_EDIT_MODE.store(enabled, Ordering::Relaxed);
+                    MATH_MODE.store(false, Ordering::Relaxed);
+                    pending.clear();
+                    dispatch_due = None;
+                    layout = render_all(&mut surf, &font, &text, &pending, scroll_y);
+                    paint_status(&mut surf, &font, if enabled { "paper edit: draw annotations" } else { "text mode" });
+                    disp.full_refresh(W, H);
+                    dirty = None;
+                } else if in_apply_button(&g) && PAPER_EDIT_MODE.load(Ordering::Relaxed) {
+                    if !pending.is_empty() {
+                        dispatch_due = Some((Instant::now(), true));
+                        show_status(&mut surf, &disp, &font, "applying paper edits");
+                    }
                 } else if let Some((start, end)) = math_calculate_hit(&layout, &g) {
                     let chars: Vec<char> = text.chars().collect();
                     let selected: String = chars[start..end].iter().collect();
@@ -454,7 +472,11 @@ fn run() -> std::io::Result<()> {
                     );
                     dirty = None;
                     forced_waits = 0;
-                    dispatch_due = if pending.is_empty() {
+                    dispatch_due = if pending.is_empty()
+                        || !margin_selection(&layout, &pending).is_empty()
+                    {
+                        // A surviving margin annotation remains inert until
+                        // its command is submitted with an underline.
                         None
                     } else {
                         Some((Instant::now() + debounce, false))
@@ -463,20 +485,64 @@ fn run() -> std::io::Result<()> {
                         "inktype: eraser applied locally erased={erased:?} caret={caret:?} pending={} text_revision={text_revision}",
                         pending.len()
                     );
-                } else {
+                } else if PAPER_EDIT_MODE.load(Ordering::Relaxed) {
                     pending.push(g);
-                    let command = command_selection(&layout, &pending).is_some();
-                    let pause = if command {
+                    dispatch_due = None;
+                    forced_waits = 0;
+                    show_status(&mut surf, &disp, &font, "paper edit: tap Apply when ready");
+                } else {
+                    // The right gutter is an annotation surface, not part of
+                    // the document. Snap a selection stroke to a clean gutter
+                    // rule before queueing it so it is visually distinct and
+                    // cannot be mistaken for a handwritten document glyph.
+                    let margin_stroke = is_margin_stroke(&g);
+                    if margin_stroke {
+                        canonicalize_margin_stroke(&mut g);
+                    }
+                    pending.push(g);
+                    if margin_stroke {
+                        layout = render_all(&mut surf, &font, &text, &pending, scroll_y);
+                        disp.update(
+                            W as i32 - RIGHT - 120,
+                            0,
+                            RIGHT + 120,
+                            H as i32,
+                            true,
+                        );
+                        dirty = None;
+                    }
+                    let circle_command = command_selection(&layout, &pending).is_some();
+                    let margin_ranges = margin_selection(&layout, &pending);
+                    let margin_command = !margin_ranges.is_empty();
+                    let submitted = margin_command
+                        && pending.last().is_some_and(horizontal_underline)
+                        && pending.iter().any(|gesture| {
+                            !is_margin_stroke(gesture) && !horizontal_underline(gesture)
+                        });
+                    let command = circle_command || margin_command;
+                    let pause = if submitted {
+                        Duration::ZERO
+                    } else if circle_command {
                         COMMAND_DEBOUNCE
+                    } else if margin_command {
+                        // Margin selections are inert until the handwritten
+                        // command is explicitly submitted with an underline.
+                        Duration::MAX
                     } else if MATH_MODE.load(Ordering::Relaxed) {
                         MATH_DEBOUNCE
                     } else {
                         debounce
                     };
-                    if command && pending.len() == 1 {
+                    if margin_command && !submitted {
+                        show_status(&mut surf, &disp, &font, "selected: write + underline command");
+                    } else if circle_command && pending.len() == 1 {
                         show_status(&mut surf, &disp, &font, "circle: write command");
                     }
-                    dispatch_due = Some((Instant::now() + pause, false));
+                    dispatch_due = if pause == Duration::MAX {
+                        None
+                    } else {
+                        Some((Instant::now() + pause, false))
+                    };
                     forced_waits = 0;
                     eprintln!(
                         "inktype: pen_up pending={} debounce_ms={} command={} input_revision={}",
@@ -531,10 +597,22 @@ fn run() -> std::io::Result<()> {
                 paint_status(&mut surf, &font, "placing result");
                 disp.update(STATUS_X as i32, 0, STATUS_W as i32, STATUS_H as i32, true);
             } else {
+                let chars: Vec<char> = text.chars().collect();
+                let prefix = if insert_at > 0 && chars[insert_at - 1] != '\n' {
+                    "\n"
+                } else {
+                    ""
+                };
+                let suffix = if insert_at < chars.len() && chars[insert_at] != '\n' {
+                    "\n"
+                } else {
+                    ""
+                };
+                let line_result = format!("{prefix}{}{suffix}", raw.trim());
                 insert_presented_result(
                     &mut text,
                     insert_at,
-                    &raw,
+                    &line_result,
                     &mut undo,
                     &mut redo,
                 );
@@ -553,25 +631,39 @@ fn run() -> std::io::Result<()> {
                 reply.source_end,
                 &reply.source,
             );
-            let Ok(placement) = reply.result else {
-                eprintln!("inktype: result placement {} failed", reply.id);
-                continue;
+            let (at, placed_text) = match reply.result {
+                Ok(placement) => {
+                    let at = if reply.text_revision == text_revision {
+                        placement.at
+                    } else if let Some(at) = fallback {
+                        at
+                    } else {
+                        eprintln!("inktype: discarded placement {}; source changed", reply.id);
+                        continue;
+                    };
+                    (at, placement.text)
+                }
+                Err(error) => {
+                    eprintln!(
+                        "inktype: result placement {} failed: {error}; using local line fallback",
+                        reply.id
+                    );
+                    let Some(at) = fallback else {
+                        eprintln!("inktype: discarded result {}; source changed", reply.id);
+                        continue;
+                    };
+                    let prefix = if at > 0 && chars[at - 1] != '\n' { "\n" } else { "" };
+                    let suffix = if at < chars.len() && chars[at] != '\n' { "\n" } else { "" };
+                    (at, format!("{prefix}{}{suffix}", reply.raw_result.trim()))
+                }
             };
-            let at = if reply.text_revision == text_revision {
-                placement.at
-            } else if let Some(at) = fallback {
-                at
-            } else {
-                eprintln!("inktype: discarded placement {}; source changed", reply.id);
-                continue;
-            };
-            if at > chars.len() || placement.text.trim().is_empty() {
+            if at > chars.len() || placed_text.trim().is_empty() {
                 continue;
             }
             insert_presented_result(
                 &mut text,
                 at,
-                &placement.text,
+                &placed_text,
                 &mut undo,
                 &mut redo,
             );
@@ -637,12 +729,16 @@ fn run() -> std::io::Result<()> {
                     end: model_end,
                     selector,
                 }) => {
-                    let Some((selected_start, selected_end)) = command_selection(&layout, &pending)
-                    else {
-                        eprintln!("inktype: refused rat command without a local circle selection");
+                    let margin_ranges = margin_selection(&layout, &pending);
+                    let local_range = if margin_ranges.is_empty() {
+                        command_selection(&layout, &pending)
+                    } else {
+                        Some((margin_ranges.first().unwrap().0, margin_ranges.last().unwrap().1))
+                    };
+                    let Some((start, end)) = local_range else {
+                        eprintln!("inktype: refused rat command without a local selection");
                         continue;
                     };
-                    let (start, end) = (selected_start, selected_end);
                     if (model_start, model_end) != (start, end) {
                         eprintln!(
                             "inktype: corrected model rat range={model_start}..{model_end} to local selection={start}..{end}"
@@ -653,7 +749,18 @@ fn run() -> std::io::Result<()> {
                         eprintln!("inktype: invalid rat range={start}..{end}");
                         continue;
                     }
-                    let source: String = chars[start..end].iter().collect();
+                    let source_identity: String = chars[start..end].iter().collect();
+                    let execution = if margin_ranges.is_empty() {
+                        source_identity.clone()
+                    } else {
+                        margin_ranges
+                            .iter()
+                            .map(|&(range_start, range_end)| {
+                                chars[range_start..range_end].iter().collect::<String>()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
                     pending.clear();
                     dispatch_due = None;
                     forced_waits = 0;
@@ -670,15 +777,15 @@ fn run() -> std::io::Result<()> {
                         true,
                     );
                     eprintln!(
-                        "inktype: rat run={run_id} selector={selector:?} range={start}..{end} source={source:?}"
+                        "inktype: rat run={run_id} selector={selector:?} range={start}..{end} execution={execution:?}"
                     );
                     runner.run(
                         run_id,
                         selector,
                         start,
                         end,
-                        source.clone(),
-                        source,
+                        execution,
+                        source_identity,
                         run_tx.clone(),
                     );
                 }
@@ -807,11 +914,30 @@ fn run() -> std::io::Result<()> {
                     end,
                     text: replacement,
                 }) => {
-                    // Command gestures always apply to the locally computed
-                    // circle selection; do not trust a vision model to count
-                    // the character offsets itself.
-                    let command_range = command_selection(&layout, &pending);
-                    let (start, end) = command_range.unwrap_or((start, end));
+                    // Selection marks and handwritten commands are an
+                    // ephemeral annotation layer. They can select canonical
+                    // text, but must never become canonical document data.
+                    // Keep the locally derived range authoritative for both
+                    // circle and right-margin commands and consume the whole
+                    // annotation after a successful command.
+                    let margin_ranges = margin_selection(&layout, &pending);
+                    let command_range = if margin_ranges.is_empty() {
+                        command_selection(&layout, &pending)
+                    } else {
+                        Some((
+                            margin_ranges.first().unwrap().0,
+                            margin_ranges.last().unwrap().1,
+                        ))
+                    };
+                    let (mut start, end) = command_range.unwrap_or((start, end));
+                    // Starting a new ruled line is insertion-only. Vision
+                    // models sometimes return the preceding code line as the
+                    // replacement range, which can erase indentation-sensitive
+                    // statements such as `return c`. Insert at the reported
+                    // range end instead of replacing any canonical source.
+                    if command_range.is_none() && replacement.starts_with('\n') {
+                        start = end;
+                    }
                     let consume = if command_range.is_some() {
                         pending.len()
                     } else {
@@ -820,7 +946,7 @@ fn run() -> std::io::Result<()> {
                     if command_range.is_some() {
                         let action_leak = matches!(
                             replacement.trim().to_ascii_lowercase().as_str(),
-                            "correct" | "sort" | "calculate" | "reflow" | "run" | "py" | "r"
+                            "correct" | "fix" | "sort" | "calculate" | "reflow" | "run" | "py" | "r"
                         );
                         if replacement.is_empty() || action_leak {
                             eprintln!(
@@ -860,10 +986,41 @@ fn run() -> std::io::Result<()> {
                         eprintln!("inktype: applied request={id} consume={consume} range={start}..{end} replacement={replacement:?} text_revision={text_revision} paint_ms={}", paint.elapsed().as_millis());
                     }
                 }
+                Ok(Decision::PaperEdits { edits }) => {
+                    match apply_exact_edits(&text, &edits) {
+                        Ok(updated) => {
+                            checkpoint(&mut undo, &mut redo, &text);
+                            text = updated;
+                            pending.clear();
+                            dispatch_due = None;
+                            caret = None;
+                            forced_waits = 0;
+                            input_revision += 1;
+                            text_revision += 1;
+                            if let Err(e) = std::fs::write(&path, &text) {
+                                eprintln!("inktype: save paper edit: {e}");
+                            }
+                            layout = render_all(&mut surf, &font, &text, &pending, scroll_y);
+                            paint_status(&mut surf, &font, "paper edits applied");
+                            disp.full_refresh(W, H);
+                            dirty = None;
+                        }
+                        Err(error) => {
+                            eprintln!("inktype: rejected paper edits: {error}");
+                            show_status(&mut surf, &disp, &font, "paper edit rejected - annotations retained");
+                            dispatch_due = None;
+                        }
+                    }
+                }
                 Ok(Decision::Run { .. }) => unreachable!("RUN normalized to RAT"),
                 Err(e) => {
                     eprintln!("inktype: oracle error request={id}: {e}; retaining ink");
-                    if command_selection(&layout, &pending).is_some() {
+                    if PAPER_EDIT_MODE.load(Ordering::Relaxed) {
+                        show_status(&mut surf, &disp, &font, "paper edit unclear - annotations retained");
+                        dispatch_due = None;
+                    } else if command_selection(&layout, &pending).is_some()
+                        || !margin_selection(&layout, &pending).is_empty()
+                    {
                         show_status(&mut surf, &disp, &font, "command unclear - retained");
                         dispatch_due = None;
                     } else if MATH_MODE.load(Ordering::Relaxed) && forced_waits < MAX_FORCED_WAITS {
@@ -935,8 +1092,19 @@ fn launch(
         return None;
     }
     let t0 = Instant::now();
-    let (x, y, w, h) = pending_crop(pending);
-    let png = match crop_png(surf, x, y, w, h) {
+    let paper_edit = PAPER_EDIT_MODE.load(Ordering::Relaxed);
+    let (x, y, w, h) = if paper_edit {
+        (0, 0, W, H)
+    } else {
+        pending_crop(pending)
+    };
+    let dots_text = std::env::var("INKTYPE_OPENAI_MODEL")
+        .is_ok_and(|model| model.contains("dots.ocr"));
+    let png = match if dots_text {
+        pending_only_png(pending, x, y, w, h)
+    } else {
+        crop_png(surf, x, y, w, h)
+    } {
         Ok(p) => p,
         Err(e) => {
             eprintln!("inktype: encode: {e}");
@@ -959,7 +1127,18 @@ fn launch(
             .filter(|p| (p.baseline - first.1).abs() <= LINE_STEP)
             .map(|p| p.index)
     });
-    let selection = command_selection(layout, pending);
+    let margin_ranges = if paper_edit {
+        Vec::new()
+    } else {
+        margin_selection(layout, pending)
+    };
+    let selection = if paper_edit {
+        None
+    } else if margin_ranges.is_empty() {
+        command_selection(layout, pending)
+    } else {
+        Some((margin_ranges.first().unwrap().0, margin_ranges.last().unwrap().1))
+    };
     let anchor = selection
         .map(|(start, _)| start)
         .or(caret_anchor)
@@ -979,9 +1158,24 @@ fn launch(
     let mut hint = String::new();
     let pending_count = pending.len();
     if let Some((start, end)) = selection {
-        let selected: String = text_chars[start..end].iter().collect();
+        let selected: String = if margin_ranges.is_empty() {
+            text_chars[start..end].iter().collect()
+        } else {
+            margin_ranges
+                .iter()
+                .map(|&(range_start, range_end)| {
+                    text_chars[range_start..range_end].iter().collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let selection_kind = if margin_ranges.is_empty() {
+            "The first gesture is a loose circle"
+        } else {
+            "Vertical strokes in the right margin select only the crossed text lines; the final horizontal underline submits the handwritten command"
+        };
         hint.push_str(&format!(
-            "COMMAND MODE. The first gesture is a loose circle selecting exact range {start}..{end}, SELECTED={selected:?}. Read the handwritten action beside the circle. Supported transformations: sort, calculate, correct prose/code (preserve fences), and reflow. 'df NAME', 'py df NAME', or 'r df NAME' captures the selected table as a persistent data frame (defaults: py and name df); return DATA:{pending_count},{start},{end}:RUNTIME:NAME:JSON with compact columns/rows JSON. A handwritten runtime selector executes the exact selection with rat: run means py; common selectors are py, r, and pi; named selectors are allowed. Known selectors: [{rat_runtimes}]. For execution return RAT:{pending_count},{start},{end}:SELECTOR. For transformations edit exactly {start}..{end}. Consume every pending gesture. If no action/selector is legible yet, return ?. "
+            "COMMAND MODE. {selection_kind}, selecting authoritative outer range {start}..{end}, SELECTED={selected:?}. Read only the handwritten action; ignore the margin strokes and submission underline. Supported transformations: sort, calculate, correct/fix prose or code (REPLACE the selected text; never append a second corrected copy; preserve exact Python indentation, runnable syntax, and fences), and reflow. 'df NAME', 'py df NAME', or 'r df NAME' captures the selected table as a persistent data frame (defaults: py and name df); return DATA:{pending_count},{start},{end}:RUNTIME:NAME:JSON with compact columns/rows JSON. A handwritten runtime selector executes the exact selection with rat: run means py; common selectors are py, r, and pi; named selectors are allowed. Known selectors: [{rat_runtimes}]. For execution return RAT:{pending_count},{start},{end}:SELECTOR. For transformations edit exactly {start}..{end}. Consume every pending gesture. If no action/selector is legible yet, return ?. "
         ));
     }
     if selection.is_none() {
@@ -1037,6 +1231,7 @@ fn launch(
         hint,
         command: selection.is_some(),
         math_mode: MATH_MODE.load(Ordering::Relaxed),
+        paper_edit,
         crop_x: x,
         crop_y: y,
         crop_w: w,
@@ -1070,6 +1265,14 @@ const MODE_X: i32 = RESET_X + RESET_W + 18;
 const MODE_Y: i32 = RESET_Y;
 const MODE_W: i32 = 190;
 const MODE_H: i32 = RESET_H;
+const PAPER_X: i32 = MODE_X + MODE_W + 18;
+const PAPER_Y: i32 = MODE_Y;
+const PAPER_W: i32 = 210;
+const PAPER_H: i32 = RESET_H;
+const APPLY_X: i32 = PAPER_X + PAPER_W + 18;
+const APPLY_Y: i32 = PAPER_Y;
+const APPLY_W: i32 = 150;
+const APPLY_H: i32 = RESET_H;
 
 fn in_reset_button(g: &Gesture) -> bool {
     !g.points.is_empty()
@@ -1083,6 +1286,22 @@ fn in_mode_button(g: &Gesture) -> bool {
         && g.points.iter().all(|&(x, y, _)| {
             (MODE_X..=MODE_X + MODE_W).contains(&x)
                 && (MODE_Y..=MODE_Y + MODE_H).contains(&y)
+        })
+}
+
+fn in_paper_button(g: &Gesture) -> bool {
+    !g.points.is_empty()
+        && g.points.iter().all(|&(x, y, _)| {
+            (PAPER_X..=PAPER_X + PAPER_W).contains(&x)
+                && (PAPER_Y..=PAPER_Y + PAPER_H).contains(&y)
+        })
+}
+
+fn in_apply_button(g: &Gesture) -> bool {
+    !g.points.is_empty()
+        && g.points.iter().all(|&(x, y, _)| {
+            (APPLY_X..=APPLY_X + APPLY_W).contains(&x)
+                && (APPLY_Y..=APPLY_Y + APPLY_H).contains(&y)
         })
 }
 
@@ -1126,6 +1345,21 @@ fn paint_mode_button(surf: &mut Surface, font: &FontRef) {
         y as f32 + 36.0,
         if MATH_MODE.load(Ordering::Relaxed) { "Math: ON" } else { "Math: OFF" },
     );
+}
+
+fn paint_paper_buttons(surf: &mut Surface, font: &FontRef) {
+    let enabled = PAPER_EDIT_MODE.load(Ordering::Relaxed);
+    for (x, y, w, h, label) in [
+        (PAPER_X, PAPER_Y, PAPER_W, PAPER_H, if enabled { "Edit: ON" } else { "Edit: OFF" }),
+        (APPLY_X, APPLY_Y, APPLY_W, APPLY_H, "Apply"),
+    ] {
+        surf.fill_rect(x as usize, y as usize, w as usize, h as usize, WHITE);
+        surf.fill_rect(x as usize, y as usize, w as usize, 2, BLACK);
+        surf.fill_rect(x as usize, (y + h - 2) as usize, w as usize, 2, BLACK);
+        surf.fill_rect(x as usize, y as usize, 2, h as usize, BLACK);
+        surf.fill_rect((x + w - 2) as usize, y as usize, 2, h as usize, BLACK);
+        draw_label(surf, font, 27.0, x as f32 + 18.0, y as f32 + 36.0, label);
+    }
 }
 
 fn paint_reset_button(surf: &mut Surface, font: &FontRef) {
@@ -1230,6 +1464,7 @@ fn render_all(
     }
     paint_reset_button(surf, font);
     paint_mode_button(surf, font);
+    paint_paper_buttons(surf, font);
     layout
 }
 
@@ -1757,6 +1992,10 @@ fn erased_range(layout: &Layout, g: &Gesture) -> Option<(usize, usize)> {
 fn erase_pending_ink(pending: &mut Vec<Gesture>, eraser: &Gesture) {
     let mut out: Vec<Gesture> = Vec::new();
     for g in pending.drain(..) {
+        if is_margin_stroke(&g) {
+            erase_margin_annotation(&g, eraser, &mut out);
+            continue;
+        }
         let mut run: Vec<(i32, i32, i32)> = Vec::new();
         for &(x, y, r) in &g.points {
             let hit = eraser.points.iter().any(|&(ex, ey, er)| {
@@ -1788,6 +2027,43 @@ fn erase_pending_ink(pending: &mut Vec<Gesture>, eraser: &Gesture) {
     *pending = out;
 }
 
+/// Subtract the eraser's vertical coverage from a canonical margin rule. The
+/// remaining pieces become independent selection rules, so selection ranges
+/// are recomputed naturally by `margin_selection()` on the next render.
+fn erase_margin_annotation(g: &Gesture, eraser: &Gesture, out: &mut Vec<Gesture>) {
+    let Some((x0, y0, x1, y1)) = gesture_bounds(g) else {
+        return;
+    };
+    let x = (x0 + x1) / 2;
+    let radius = g.points.iter().map(|point| point.2).max().unwrap_or(3);
+    let mut cuts: Vec<(i32, i32)> = eraser
+        .points
+        .iter()
+        .filter_map(|&(ex, ey, er)| {
+            ((ex - x).abs() <= er + radius + 4)
+                .then_some(((ey - er - radius).max(y0), (ey + er + radius).min(y1)))
+        })
+        .filter(|(start, end)| start < end)
+        .collect();
+    cuts.sort_unstable();
+    let mut cursor = y0;
+    for (cut_start, cut_end) in cuts {
+        if cut_start > cursor && cut_start - cursor >= LINE_STEP * 3 / 4 {
+            out.push(Gesture {
+                tool: Tool::Pen,
+                points: vec![(x, cursor, radius), (x, cut_start, radius)],
+            });
+        }
+        cursor = cursor.max(cut_end);
+    }
+    if y1 - cursor >= LINE_STEP * 3 / 4 {
+        out.push(Gesture {
+            tool: Tool::Pen,
+            points: vec![(x, cursor, radius), (x, y1, radius)],
+        });
+    }
+}
+
 fn draw_gesture(surf: &mut Surface, g: &Gesture) {
     let color = if g.tool == Tool::Pen { BLACK } else { WHITE };
     for (i, &(x, y, r)) in g.points.iter().enumerate() {
@@ -1798,6 +2074,78 @@ fn draw_gesture(surf: &mut Surface, g: &Gesture) {
             surf.brush_line(px, py, x, y, r.min(pr + 1), color);
         }
     }
+}
+
+fn gesture_bounds(g: &Gesture) -> Option<(i32, i32, i32, i32)> {
+    let &(mut x0, mut y0, _) = g.points.first()?;
+    let (mut x1, mut y1) = (x0, y0);
+    for &(x, y, _) in &g.points {
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x);
+        y1 = y1.max(y);
+    }
+    Some((x0, y0, x1, y1))
+}
+
+fn is_margin_stroke(g: &Gesture) -> bool {
+    let Some((x0, y0, x1, y1)) = gesture_bounds(g) else {
+        return false;
+    };
+    // Reserve a generous right gutter. Requiring a tall, narrow stroke keeps
+    // ordinary handwriting near the end of a long line in text mode.
+    g.tool == Tool::Pen
+        && (x0 + x1) / 2 >= W as i32 - RIGHT - 70
+        && x1 - x0 <= 44
+        // Letters such as l, f, and t written near the gutter must remain
+        // handwriting. A selection rule spans almost a full ruled line.
+        && y1 - y0 >= LINE_STEP * 3 / 4
+}
+
+fn canonicalize_margin_stroke(g: &mut Gesture) {
+    let Some((_, y0, _, y1)) = gesture_bounds(g) else {
+        return;
+    };
+    let x = W as i32 - RIGHT / 2;
+    let radius = g.points.iter().map(|point| point.2).max().unwrap_or(3);
+    g.points = vec![(x, y0, radius), (x, y1, radius)];
+}
+
+fn horizontal_underline(g: &Gesture) -> bool {
+    let Some((x0, y0, x1, y1)) = gesture_bounds(g) else {
+        return false;
+    };
+    g.tool == Tool::Pen && x1 - x0 >= 55 && y1 - y0 <= 24
+}
+
+/// Return separate canonical ranges for the groups of visual lines crossed by
+/// right-margin strokes. A gap between strokes remains a gap in the source.
+fn margin_selection(layout: &Layout, pending: &[Gesture]) -> Vec<(usize, usize)> {
+    let mut selected = Vec::new();
+    for gesture in pending.iter().filter(|gesture| is_margin_stroke(gesture)) {
+        let (_, y0, _, y1) = gesture_bounds(gesture).unwrap();
+        for (line_index, line) in layout.lines.iter().enumerate() {
+            let glyph_top = line.baseline - FONT_PX as i32;
+            let glyph_bottom = line.baseline + 20;
+            if y1 >= glyph_top && y0 <= glyph_bottom && line.start < line.end {
+                selected.push((line_index, line.start, line.end));
+            }
+        }
+    }
+    selected.sort_unstable();
+    selected.dedup_by_key(|entry| entry.0);
+    let mut ranges: Vec<(usize, usize, usize)> = Vec::new();
+    for (line_index, start, end) in selected {
+        if let Some((last_line, _, last_end)) = ranges.last_mut() {
+            if line_index == *last_line + 1 {
+                *last_line = line_index;
+                *last_end = end;
+                continue;
+            }
+        }
+        ranges.push((line_index, start, end));
+    }
+    ranges.into_iter().map(|(_, start, end)| (start, end)).collect()
 }
 
 /// Detect a large closed first stroke and return the typeset character range
@@ -1879,6 +2227,72 @@ fn pending_crop(pending: &[Gesture]) -> (i32, i32, usize, usize) {
     (x0, y0, (x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize)
 }
 
+fn pending_only_png(
+    pending: &[Gesture],
+    x0: i32,
+    y0: i32,
+    w: usize,
+    h: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut gray = vec![255u8; w * h];
+    let mut stamp = |x: i32, y: i32, radius: i32| {
+        let radius = radius.max(2);
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx * dx + dy * dy <= radius * radius {
+                    let (px, py) = (x - x0 + dx, y - y0 + dy);
+                    if px >= 0 && py >= 0 && px < w as i32 && py < h as i32 {
+                        gray[py as usize * w + px as usize] = 0;
+                    }
+                }
+            }
+        }
+    };
+    for gesture in pending {
+        for (i, &(x, y, r)) in gesture.points.iter().enumerate() {
+            if let Some(&(px, py, pr)) = i.checked_sub(1).and_then(|j| gesture.points.get(j)) {
+                let steps = (x - px).abs().max((y - py).abs()).max(1);
+                for step in 0..=steps {
+                    stamp(
+                        px + (x - px) * step / steps,
+                        py + (y - py) * step / steps,
+                        r.min(pr + 1),
+                    );
+                }
+            } else {
+                stamp(x, y, r);
+            }
+        }
+    }
+    let factor = w.max(h).div_ceil(720).max(1);
+    let (ow, oh) = (w.div_ceil(factor), h.div_ceil(factor));
+    let mut reduced = vec![255u8; ow * oh];
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let mut darkest = 255u8;
+            for dy in 0..factor {
+                for dx in 0..factor {
+                    let (sx, sy) = (ox * factor + dx, oy * factor + dy);
+                    if sx < w && sy < h {
+                        darkest = darkest.min(gray[sy * w + sx]);
+                    }
+                }
+            }
+            reduced[oy * ow + ox] = darkest;
+        }
+    }
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, ow as u32, oh as u32);
+    enc.set_color(png::ColorType::Grayscale);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.set_compression(png::Compression::Fast);
+    enc.write_header()
+        .map_err(std::io::Error::other)?
+        .write_image_data(&reduced)
+        .map_err(std::io::Error::other)?;
+    Ok(out)
+}
+
 fn crop_png(surf: &Surface, x0: i32, y0: i32, w: usize, h: usize) -> std::io::Result<Vec<u8>> {
     let factor = w.max(h).div_ceil(720).max(1);
     let ow = w.div_ceil(factor);
@@ -1913,6 +2327,28 @@ fn crop_png(surf: &Surface, x0: i32, y0: i32, w: usize, h: usize) -> std::io::Re
             .map_err(std::io::Error::other)?;
     }
     Ok(out)
+}
+
+fn apply_exact_edits(document: &str, edits: &[(String, String)]) -> Result<String, String> {
+    let mut ranges = Vec::new();
+    for (old_text, new_text) in edits {
+        let matches: Vec<usize> = document.match_indices(old_text).map(|(at, _)| at).take(2).collect();
+        if matches.len() != 1 {
+            return Err(format!("old_text must match exactly once: {old_text:?}"));
+        }
+        ranges.push((matches[0], matches[0] + old_text.len(), new_text));
+    }
+    ranges.sort_by_key(|range| range.0);
+    for pair in ranges.windows(2) {
+        if pair[0].1 > pair[1].0 {
+            return Err("paper edits overlap".into());
+        }
+    }
+    let mut updated = document.to_string();
+    for (start, end, replacement) in ranges.into_iter().rev() {
+        updated.replace_range(start..end, replacement);
+    }
+    Ok(updated)
 }
 
 fn checkpoint(undo: &mut Vec<String>, redo: &mut Vec<String>, text: &str) {

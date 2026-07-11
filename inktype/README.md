@@ -29,9 +29,12 @@ exact canonical selection through rat: `run` is an alias for `py`; `py`, `r`,
 `rat run <selector> <selection>` from `/home/root/inktype-repl`. Rat therefore
 owns project scoping, named-runtime resolution, startup, environments, and
 persistent state. The model only recognizes the selector and cannot change the
-locally computed source range. The current tablet setup includes uv/Python (pandas and matplotlib), R 4.5
-(jsonlite and ggplot2), Node, pi, tmux, and rat; the launcher reuses InkType's
-Gemini key for pi's Google provider.
+locally computed source range. Selection strokes, handwritten selectors/actions,
+and their submission underline are temporary annotations: they never enter the
+canonical document and disappear together after a successful command or
+execution. The current tablet setup includes uv/Python (pandas and matplotlib),
+R 4.5 (jsonlite and ggplot2), Node, pi, tmux, and rat; the launcher reuses
+InkType's Gemini key for pi's Google provider.
 
 Circle a canonical table and write `df sales` (Python), `py df sales`, or
 `r df sales`. Gemini returns validated columns/rows JSON; InkType creates the

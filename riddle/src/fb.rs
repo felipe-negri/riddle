@@ -14,7 +14,12 @@ pub struct BBox {
 
 impl BBox {
     pub fn empty() -> Self {
-        Self { x0: i32::MAX, y0: i32::MAX, x1: i32::MIN, y1: i32::MIN }
+        Self {
+            x0: i32::MAX,
+            y0: i32::MAX,
+            x1: i32::MIN,
+            y1: i32::MIN,
+        }
     }
     pub fn is_empty(&self) -> bool {
         self.x0 > self.x1
@@ -26,6 +31,11 @@ impl BBox {
         self.y1 = self.y1.max(y + margin).min(SCREEN_H as i32 - 1);
     }
     pub fn rect(&self) -> (i32, i32, i32, i32) {
-        (self.x0, self.y0, self.x1 - self.x0 + 1, self.y1 - self.y0 + 1)
+        (
+            self.x0,
+            self.y0,
+            self.x1 - self.x0 + 1,
+            self.y1 - self.y0 + 1,
+        )
     }
 }

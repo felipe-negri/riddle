@@ -53,6 +53,48 @@ $CXX -O2 \
     -Wl,-rpath,/home/root/quill \
     -o build/image_demo
 
+# color_probe: experimental EPContentType::Color / ACEP path probe.
+$CC -O2 src/color_probe.c \
+    -L build -lquill \
+    -L vendor -lqsgepaper \
+    -lQt6Gui -lQt6Core -lstdc++ \
+    -Wl,-rpath,/home/root/quill \
+    -o build/color_probe
+
+# color_mode_compare: same pattern, side-by-side, refreshed with different modes.
+$CC -O2 src/color_mode_compare.c \
+    -L build -lquill \
+    -L vendor -lqsgepaper \
+    -lQt6Gui -lQt6Core -lstdc++ \
+    -Wl,-rpath,/home/root/quill \
+    -o build/color_mode_compare
+
+# color_partial_probe: small dirty-rect color additions/erasures/churn.
+$CC -O2 src/color_partial_probe.c \
+    -L build -lquill \
+    -L vendor -lqsgepaper \
+    -lQt6Gui -lQt6Core -lstdc++ \
+    -Wl,-rpath,/home/root/quill \
+    -o build/color_partial_probe
+
+# color_blend_probe: software alpha blending, color mixing, and stacking.
+$CC -O2 src/color_blend_probe.c \
+    -L build -lquill \
+    -L vendor -lqsgepaper \
+    -lQt6Gui -lQt6Core -lstdc++ \
+    -Wl,-rpath,/home/root/quill \
+    -o build/color_blend_probe
+
+# color_image_demo: render PNG/JPEG/etc. through the verified color path.
+$CXX -O2 \
+    -I "$QTINC" -I "$QTINC/QtCore" -I "$QTINC/QtGui" \
+    src/color_image_demo.cpp \
+    -L build -lquill \
+    -L vendor -lqsgepaper \
+    -lQt6Gui -lQt6Core -lstdc++ \
+    -Wl,-rpath,/home/root/quill \
+    -o build/color_image_demo
+
 # image_anim_demo: regional black/white fade animation experiment.
 $CXX -O2 \
     -I "$QTINC" -I "$QTINC/QtCore" -I "$QTINC/QtGui" \
@@ -91,4 +133,12 @@ $CXX -O2 \
     -Wl,-rpath,/home/root/quill \
     -o build/home
 
-echo "built: build/libquill.so build/scribble build/map_demo build/image_demo build/image_anim_demo build/gif_demo build/drawlab build/home"
+# voicepad: receive phone/server transcripts over TCP and render them.
+$CC -O2 src/voicepad.c \
+    -L build -lquill \
+    -L vendor -lqsgepaper \
+    -lQt6Gui -lQt6Core -lstdc++ \
+    -Wl,-rpath,/home/root/quill \
+    -o build/voicepad
+
+echo "built: build/libquill.so build/scribble build/map_demo build/image_demo build/color_probe build/color_mode_compare build/color_partial_probe build/color_blend_probe build/color_image_demo build/image_anim_demo build/gif_demo build/drawlab build/home build/voicepad"

@@ -65,7 +65,13 @@ unsafe impl Send for QtfbClient {}
 
 impl QtfbClient {
     /// Connect and initialize with the default resolution of `format`.
-    pub fn connect(key: i32, format: u8, width: usize, height: usize, bpp: usize) -> io::Result<Self> {
+    pub fn connect(
+        key: i32,
+        format: u8,
+        width: usize,
+        height: usize,
+        bpp: usize,
+    ) -> io::Result<Self> {
         let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
