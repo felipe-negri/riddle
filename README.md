@@ -1,4 +1,4 @@
-# riddle — the diary of Tom Riddle, for the reMarkable Paper Pro
+# riddle — the diary of Tom Riddle
 
 Write on the page with your pen. After a pause, the diary **drinks your ink** —
 your words fade into the paper — the page thinks for a moment, and an answer
@@ -7,6 +7,54 @@ writes itself back in a flowing hand, stroke by stroke, then fades away.
 No screen glow, no keyboard, no chat UI. Just ink appearing on paper.
 
 _This is the diary from [the demo](https://x.com/MaximeRivest)._
+
+> **This is a fork of [MaximeRivest/riddle](https://github.com/MaximeRivest/riddle)**
+> that adds a native **Android** app (S-Pen optimized) alongside the original
+> reMarkable Paper Pro app, with support for more LLM providers: OpenAI-compatible,
+> **Ollama**, **Anthropic (Claude)**, **Gemini**, and **GitHub Copilot**
+> (experimental). See **[Android](#android)** below. Everything past that
+> section documents the original reMarkable app, unchanged.
+
+## Android
+
+Kotlin + Jetpack Compose, in [`android/`](android/) — a from-scratch port for
+S-Pen-equipped Samsung tablets/phones (the reMarkable app's pen/e-ink layers
+are hardware-specific and don't run on Android; the oracle logic, handwriting
+persona, and Dancing Script reply animation do carry over).
+
+- **Write with the S-Pen** — pressure + tilt captured natively, 2.8s
+  idle-commit, same as the original.
+- **Handwriting → LLM two ways**: on-device recognition ([ML Kit Digital
+  Ink](https://developers.google.com/ml-kit/vision/digital-ink-recognition))
+  turns strokes into text for any text-only model, and the page image feeds
+  vision-capable models — whichever the selected provider supports.
+- **Five LLM providers**, picked and configured in-app under Settings:
+  OpenAI-compatible (OpenAI, OpenRouter, Groq, local servers), **Ollama**
+  (local/LAN server, vision or text models), **Anthropic**, **Gemini**, and
+  **GitHub Copilot** (device-code sign-in against `api.githubcopilot.com` —
+  undocumented, may break without notice).
+- **Reply animates in Dancing Script**, traced stroke-by-stroke via real glyph
+  paths (`Paint.getTextPath` + `PathMeasure`), then fades.
+- **Memory** (Room-backed): recent pages ride along as conversation context,
+  and "show me what I wrote about…" conjures a past page — same `⟦show:N⟧` /
+  `⁂` protocol as the original oracle.
+
+### Build
+
+```sh
+cd android
+./gradlew assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+Requires JDK 17+ and the Android SDK (`ANDROID_HOME`). A GitHub Actions
+workflow ([`.github/workflows/android-build.yml`](.github/workflows/android-build.yml))
+builds the debug APK and uploads it as a workflow artifact on every push to
+`android/`, and can be run on demand from the Actions tab.
+
+Open the app's Settings (gear icon) to pick a provider and enter its API
+key/URL/model — keys are stored in `EncryptedSharedPreferences`, never
+committed or synced elsewhere.
 
 ### 🪄 New to this? Start here
 
